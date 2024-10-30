@@ -130,4 +130,4 @@ Step 8: Compile the Results
 
 Step 9: Output the Analysis
 -Generate a Report: Create a comprehensive report summarizing the analysis of all scenarios, including the final scores without explanation. It should show total evaluation for every prompt and their final average value.
--Export the Results: Save the results in a format that is easily reviewable, such as TXT file.
+-Export the Results: Save the results in a format that is easily reviewable.
