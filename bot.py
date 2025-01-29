@@ -1,98 +1,106 @@
-import asyncio
-from telegram import Update, InputFile
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-import subprocess
+# bot.py
 import os
+import logging
+from telegram import Update, ReplyKeyboardMarkup
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters
+)
+from dotenv import load_dotenv
 
-# Обработчик команды /start
+from model_test import generate_and_save_responses
+from evaluator import evaluate_responses, create_summary
+
+load_dotenv()
+
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+
+# Пример списков моделей:
+OPENAI_MODELS = ["gpt-4o-mini", "gpt-3.5-turbo"]
+HUGGINGFACE_MODELS = ["tiiuae/falcon-7b-instruct"]
+
+user_selection = {}
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Привет! Отправь CSV-файл для оценки ответов на сценарии.")
+    """Обработчик команды /start."""
+    keyboard = [["OpenAI", "HuggingFace"]]
+    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
+    await update.message.reply_text(
+        "Привет! Выберите сервис ИИ для тестирования:",
+        reply_markup=reply_markup
+    )
 
-# Обработчик текстовых сообщений от пользователя
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_text = update.message.text
+async def choose_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    service = update.message.text.strip().lower()
 
-    # Запускаем сценарий для обработки текста
-    scenario_result = run_scenario(user_text)
-
-    # Отправляем результат обратно пользователю
-    await update.message.reply_text(scenario_result)
-
-# Обработчик для получения файла (например, CSV)
-async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    document = update.message.document
-    file = await context.bot.get_file(document.file_id)
-
-    # Скачиваем файл во временную директорию
-    temp_file_path = f'/tmp/{document.file_id}.csv'
-    await file.download_to_drive(temp_file_path)
-
-    # Запускаем сценарий для обработки файла
-    scenario_result = run_scenario_with_file(temp_file_path)
-
-    if os.path.exists(scenario_result):
-        # Отправляем JSON-файл обратно пользователю
-        with open(scenario_result, 'rb') as output_file:
-            await update.message.reply_document(
-                document=InputFile(output_file),
-                caption="Вот результаты после обработки файла."
-            )
-
-        # Удаляем временные файлы
-        os.remove(temp_file_path)
-        os.remove(scenario_result)
-        # Удаляем ai_responses.csv из директории сценария
-        ai_responses_path = os.path.join(os.path.dirname(scenario_result), 'ai_responses.csv')
-        if os.path.exists(ai_responses_path):
-            os.remove(ai_responses_path)
+    if service == "openai":
+        user_selection[user_id] = {"service": "openai"}
+        keyboard = [[m] for m in OPENAI_MODELS]
+        reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
+        await update.message.reply_text("Выберите модель OpenAI:", reply_markup=reply_markup)
+    elif service == "huggingface":
+        user_selection[user_id] = {"service": "huggingface"}
+        keyboard = [[m] for m in HUGGINGFACE_MODELS]
+        reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
+        await update.message.reply_text("Выберите модель HuggingFace:", reply_markup=reply_markup)
     else:
-        await update.message.reply_text(f"Произошла ошибка при обработке файла: {scenario_result}")
+        await update.message.reply_text("Пожалуйста, выберите корректный сервис (OpenAI или HuggingFace).")
 
-# Функция для запуска сценария с текстом
-def run_scenario(user_input):
-    try:
-        # Используем Python из виртуального окружения
-        result = subprocess.run(
-            ['/root/telegram_bot/venv/bin/python3', '/root/telegram_bot/scenarios/scenario_script.py', user_input],
-            capture_output=True,
-            text=True
-        )
-        return result.stdout.strip()
-    except Exception as e:
-        return f"Произошла ошибка при выполнении сценария: {e}"
+async def choose_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    chosen_model = update.message.text.strip()
 
-# Функция для запуска сценария с файлом
-def run_scenario_with_file(file_path):
-    try:
-        # Используем Python из виртуального окружения
-        result = subprocess.run(
-            ['/root/telegram_bot/venv/bin/python3', '/root/telegram_bot/scenarios/scenario_script.py', file_path],
-            capture_output=True,
-            text=True
-        )
-        # Предполагаем, что сценарий создаёт 'evaluated_responses.json' в директории скрипта
-        script_dir = os.path.dirname('/root/telegram_bot/scenarios/scenario_script.py')
-        output_file_path = os.path.join(script_dir, 'evaluated_responses.json')
-        if os.path.exists(output_file_path):
-            return output_file_path
-        else:
-            return result.stderr.strip()
-    except Exception as e:
-        return f"Произошла ошибка при выполнении сценария: {e}"
+    if user_id not in user_selection:
+        await update.message.reply_text("Сначала введите /start и выберите сервис.")
+        return
 
-# Основная функция для запуска бота (асинхронная)
+    service = user_selection[user_id]["service"]
+    valid_models = OPENAI_MODELS if service == "openai" else HUGGINGFACE_MODELS
+
+    if chosen_model not in valid_models:
+        await update.message.reply_text("Выбрана некорректная модель. Попробуйте ещё раз.")
+        return
+
+    user_selection[user_id]["model"] = chosen_model
+    await update.message.reply_text(f"Вы выбрали {service} и модель {chosen_model}. Начинаем тестирование...")
+
+    # Генерируем ответы (CSV)
+    csv_file_path = generate_and_save_responses(service, chosen_model)
+
+    # Оцениваем ответы (JSON)
+    evaluation_file = evaluate_responses(csv_file_path)
+
+    # Формируем краткий вывод
+    summary_text = create_summary(evaluation_file)
+
+    # Отправляем результат
+    with open(evaluation_file, "rb") as f:
+        await update.message.reply_text("Вот JSON-файл с результатами оценки:")
+        await update.message.reply_document(document=f)
+
+    await update.message.reply_text(f"Краткий обзор:\n{summary_text}")
+
 def main():
-    # Создаем экземпляр приложения с токеном Telegram бота
-    app = Application.builder().token('token').build()
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-    # Добавляем обработчики для команды /start и текстовых сообщений
-    app.add_handler(CommandHandler('start', start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_handler(MessageHandler(filters.Document.FileExtension('csv'), handle_file))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.Regex("(?i)^(OpenAI|HuggingFace)$"), choose_service))
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & ~filters.Regex("(?i)^(OpenAI|HuggingFace)$"),
+        choose_model
+    ))
 
-    # Запускаем бота
     app.run_polling()
 
-# Запуск бота
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
+
